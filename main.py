@@ -3625,15 +3625,54 @@ class ChannelSelectionView(discord.ui.View):
         await view.show_channel_config(interaction)
 
     async def show_channel_selection(self, interaction):
-        # Get all channels in the guild
+        # Get all channels in the guild including threads
         channels = []
+        
+        # Regular channels
+        for channel in interaction.guild.channels:
+            if isinstance(channel, (discord.TextChannel, discord.ForumChannel, discord.VoiceChannel, discord.StageChannel, discord.CategoryChannel)):
+                channels.append(discord.SelectOption(
+                    label=f"#{channel.name}" if not isinstance(channel, discord.CategoryChannel) else f"📁 {channel.name}",
+                    value=str(channel.id),
+                    description=f"{channel.type.name.title()} - {channel.category.name if hasattr(channel, 'category') and channel.category else 'No Category'}"
+                ))
+        
+        # Add threads from text channels and forums
         for channel in interaction.guild.channels:
             if isinstance(channel, (discord.TextChannel, discord.ForumChannel)):
-                channels.append(discord.SelectOption(
-                    label=f"#{channel.name}",
-                    value=str(channel.id),
-                    description=f"{channel.type.name.title()} - {channel.category.name if channel.category else 'No Category'}"
-                ))
+                try:
+                    threads = []
+                    if isinstance(channel, discord.TextChannel):
+                        # Get active threads
+                        active_threads = await channel.active_threads()
+                        threads.extend(active_threads.threads)
+                        
+                        # Get archived threads (limit to recent ones)
+                        try:
+                            archived_threads = channel.archived_threads(limit=10)
+                            async for thread in archived_threads:
+                                threads.append(thread)
+                        except:
+                            pass
+                    elif isinstance(channel, discord.ForumChannel):
+                        # Get forum threads
+                        try:
+                            active_threads = await channel.active_threads()
+                            threads.extend(active_threads.threads)
+                        except:
+                            pass
+                    
+                    for thread in threads:
+                        channels.append(discord.SelectOption(
+                            label=f"🧵 {thread.name}",
+                            value=str(thread.id),
+                            description=f"Thread in #{channel.name}"
+                        ))
+                except Exception as e:
+                    logger.warning(f"Could not fetch threads for {channel.name}: {e}")
+        
+        # Sort channels by type and name
+        channels.sort(key=lambda x: (x.description or "", x.label))
         
         # Limit to 25 channels (Discord limit)
         channels = channels[:25]
@@ -3652,7 +3691,7 @@ class ChannelSelectionView(discord.ui.View):
         config_name = self.config_key.replace('_', ' ').title()
         embed = discord.Embed(
             title=f"Select {config_name}",
-            description="Choose a channel from the dropdown below:",
+            description="Choose a channel from the dropdown below (includes threads and forums):",
             color=BOT_CONFIG["default_embed_color"]
         )
         
@@ -3799,16 +3838,24 @@ class StaffRoleManagementView(discord.ui.View):
         await view.show_role_config(interaction)
 
     async def show_staff_roles(self, interaction):
+        # Ensure we have the latest role data
+        try:
+            await interaction.guild.chunk()
+        except:
+            pass
+        
         # Get all roles for adding
         add_roles = []
         current_staff_roles = BOT_CONFIG.get("staff_roles", [])
+        all_roles = sorted(interaction.guild.roles, key=lambda r: r.position, reverse=True)
         
-        for role in interaction.guild.roles:
+        for role in all_roles:
             if role.id not in current_staff_roles and not role.is_bot_managed() and role != interaction.guild.default_role:
+                color_info = f"#{role.color.value:06x}" if role.color.value != 0 else "No Color"
                 add_roles.append(discord.SelectOption(
-                    label=role.name,
+                    label=role.name[:100],
                     value=str(role.id),
-                    description=f"Members: {len(role.members)}"
+                    description=f"Members: {len(role.members)} • Pos: {role.position} • {color_info}"[:100]
                 ))
         
         add_roles = add_roles[:25]  # Discord limit
@@ -3818,44 +3865,52 @@ class StaffRoleManagementView(discord.ui.View):
         for role_id in current_staff_roles:
             role = interaction.guild.get_role(role_id)
             if role:
+                color_info = f"#{role.color.value:06x}" if role.color.value != 0 else "No Color"
                 remove_roles.append(discord.SelectOption(
-                    label=role.name,
+                    label=role.name[:100],
                     value=str(role.id),
-                    description=f"Members: {len(role.members)}"
+                    description=f"Members: {len(role.members)} • Pos: {role.position} • {color_info}"[:100]
                 ))
         
         # Update dropdowns
         if add_roles:
             self.children[0].options = add_roles
-            self.children[0].placeholder = "Select a role to add as staff..."
+            self.children[0].placeholder = f"Select from {len(add_roles)} available roles..."
         else:
             self.children[0].options = [discord.SelectOption(label="No roles available", value="none")]
             self.children[0].placeholder = "No roles available to add"
         
         if remove_roles:
             self.children[1].options = remove_roles
-            self.children[1].placeholder = "Select a staff role to remove..."
+            self.children[1].placeholder = f"Remove from {len(remove_roles)} staff roles..."
         else:
             self.children[1].options = [discord.SelectOption(label="No staff roles set", value="none")]
             self.children[1].placeholder = "No staff roles to remove"
         
         embed = discord.Embed(
             title="Staff Role Management",
-            description="Add or remove staff roles:",
+            description=f"Add or remove staff roles from {len(all_roles)} total server roles:",
             color=BOT_CONFIG["default_embed_color"]
         )
         
-        # Show current staff roles
+        # Show current staff roles with more detail
         staff_roles = []
         for role_id in current_staff_roles:
             role = interaction.guild.get_role(role_id)
             if role:
-                staff_roles.append(role.mention)
+                staff_roles.append(f"{role.mention} (Position: {role.position}, Members: {len(role.members)})")
         
         embed.add_field(
-            name="Current Staff Roles",
+            name=f"Current Staff Roles ({len(current_staff_roles)})",
             value="\n".join(staff_roles) if staff_roles else "None set",
             inline=False
+        )
+        
+        # Show role statistics
+        embed.add_field(
+            name="Server Role Statistics",
+            value=f"Total Roles: {len(all_roles)}\nBot Managed: {len([r for r in all_roles if r.is_bot_managed()])}\nAvailable for Staff: {len(add_roles) + len(remove_roles)}",
+            inline=True
         )
         
         if hasattr(interaction, 'response') and not interaction.response.is_done():
@@ -3897,14 +3952,28 @@ class RoleSelectionView(discord.ui.View):
         await view.show_role_config(interaction)
 
     async def show_role_selection(self, interaction):
+        # Fetch all roles from the guild to ensure we have the latest data
+        try:
+            # Force fetch roles if needed
+            await interaction.guild.chunk()
+        except:
+            pass
+        
         # Get all roles in the guild
         roles = []
-        for role in interaction.guild.roles:
+        all_roles = sorted(interaction.guild.roles, key=lambda r: r.position, reverse=True)
+        
+        for role in all_roles:
             if not role.is_bot_managed() and role != interaction.guild.default_role:
+                # Show role with position info
+                position_info = f"Pos: {role.position}"
+                color_info = f"#{role.color.value:06x}" if role.color.value != 0 else "No Color"
+                permissions_info = "Admin" if role.permissions.administrator else f"{len([p for p in role.permissions if p[1]])} perms"
+                
                 roles.append(discord.SelectOption(
-                    label=role.name,
+                    label=role.name[:100],  # Discord label limit
                     value=str(role.id),
-                    description=f"Members: {len(role.members)} • Color: {str(role.color) if role.color.value != 0 else 'None'}"
+                    description=f"Members: {len(role.members)} • {position_info} • {color_info} • {permissions_info}"[:100]
                 ))
         
         # Limit to 25 roles (Discord limit)
@@ -3924,7 +3993,7 @@ class RoleSelectionView(discord.ui.View):
         config_name = self.config_key.replace('_', ' ').title()
         embed = discord.Embed(
             title=f"Select {config_name}",
-            description="Choose a role from the dropdown below:",
+            description=f"Choose a role from the dropdown below:\nShowing {len(roles)} of {len(all_roles)-1} available roles",
             color=BOT_CONFIG["default_embed_color"]
         )
         
@@ -4088,6 +4157,11 @@ class EconomyConfigView(discord.ui.View):
         modal = CurrencyModal()
         await interaction.response.send_modal(modal)
 
+    @discord.ui.button(label="Choose Server Emoji", style=discord.ButtonStyle.secondary)
+    async def choose_emoji(self, interaction: discord.Interaction, button: discord.ui.Button):
+        view = EmojiSelectionView()
+        await view.show_emoji_selection(interaction)
+
     @discord.ui.button(label="← Back to Config", style=discord.ButtonStyle.secondary)
     async def back_to_config(self, interaction: discord.Interaction, button: discord.ui.Button):
         view = ConfigurationView()
@@ -4105,7 +4179,14 @@ class EconomyConfigView(discord.ui.View):
             color=BOT_CONFIG["default_embed_color"]
         )
         
-        embed.add_field(name="Currency Symbol", value=BOT_CONFIG.get("currency_symbol", "$"), inline=True)
+        current_symbol = BOT_CONFIG.get("currency_symbol", "$")
+        embed.add_field(name="Currency Symbol", value=current_symbol, inline=True)
+        
+        # Show if it's a custom emoji
+        if current_symbol.startswith('<:') or current_symbol.startswith('<a:'):
+            embed.add_field(name="Type", value="Server Emoji", inline=True)
+        else:
+            embed.add_field(name="Type", value="Text/Unicode", inline=True)
         
         await interaction.response.edit_message(embed=embed, view=self)
 
@@ -4115,14 +4196,24 @@ class CurrencyModal(discord.ui.Modal):
 
         self.currency_input = discord.ui.TextInput(
             label="Currency Symbol",
-            placeholder="Enter currency symbol (e.g., $, €, ¥)",
+            placeholder="Enter symbol ($, €, ¥) or emoji (:emoji_name: or <:name:id>)",
             required=True,
-            max_length=3
+            max_length=100
         )
         self.add_item(self.currency_input)
 
     async def on_submit(self, interaction: discord.Interaction):
         symbol = self.currency_input.value.strip()
+        
+        # Handle emoji names (convert :emoji_name: to actual emoji if possible)
+        if symbol.startswith(':') and symbol.endswith(':') and len(symbol) > 2:
+            emoji_name = symbol[1:-1]
+            # Try to find the emoji in the server
+            for emoji in interaction.guild.emojis:
+                if emoji.name.lower() == emoji_name.lower():
+                    symbol = str(emoji)
+                    break
+        
         BOT_CONFIG["currency_symbol"] = symbol
         save_json("bot_config.json", BOT_CONFIG)
         
@@ -4131,6 +4222,14 @@ class CurrencyModal(discord.ui.Modal):
             description=f"Currency symbol has been set to: {symbol}",
             color=0x00FF00
         )
+        
+        # Determine symbol type
+        if symbol.startswith('<:') or symbol.startswith('<a:'):
+            embed.add_field(name="Type", value="Server Emoji", inline=True)
+        elif len(symbol) == 1 and ord(symbol) > 127:
+            embed.add_field(name="Type", value="Unicode Emoji", inline=True)
+        else:
+            embed.add_field(name="Type", value="Text Symbol", inline=True)
         
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -4296,6 +4395,135 @@ async def autoresponder(interaction: discord.Interaction, action: app_commands.C
             del autoresponders[trigger.lower()]
             save_json("autoresponders.json", autoresponders)
             await interaction.response.send_message(f"✅ Autoresponder removed for trigger: `{trigger}`", ephemeral=True)
+
+class EmojiSelectionView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=300)
+        self.current_page = 0
+        self.emojis_per_page = 25
+
+    @discord.ui.select(placeholder="Select an emoji for currency...")
+    async def emoji_select(self, interaction: discord.Interaction, select: discord.ui.Select):
+        emoji_value = select.values[0]
+        
+        if emoji_value == "none":
+            await interaction.response.send_message("No emojis available.", ephemeral=True)
+            return
+        
+        # Set the currency symbol
+        BOT_CONFIG["currency_symbol"] = emoji_value
+        save_json("bot_config.json", BOT_CONFIG)
+        
+        embed = discord.Embed(
+            title="✅ Currency Symbol Updated",
+            description=f"Currency symbol has been set to: {emoji_value}",
+            color=0x00FF00
+        )
+        
+        # Go back to economy config
+        view = EconomyConfigView()
+        await interaction.response.edit_message(embed=embed, view=view)
+        
+        # Show updated config after a moment
+        await asyncio.sleep(2)
+        await view.show_economy_config(interaction)
+
+    @discord.ui.button(label="◀️ Previous", style=discord.ButtonStyle.secondary)
+    async def previous_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.current_page > 0:
+            self.current_page -= 1
+            await self.update_emoji_page(interaction)
+        else:
+            await interaction.response.defer()
+
+    @discord.ui.button(label="▶️ Next", style=discord.ButtonStyle.secondary)
+    async def next_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        guild_emojis = list(interaction.guild.emojis)
+        max_pages = (len(guild_emojis) + self.emojis_per_page - 1) // self.emojis_per_page
+        
+        if self.current_page < max_pages - 1:
+            self.current_page += 1
+            await self.update_emoji_page(interaction)
+        else:
+            await interaction.response.defer()
+
+    @discord.ui.button(label="← Back to Economy", style=discord.ButtonStyle.secondary)
+    async def back_to_economy(self, interaction: discord.Interaction, button: discord.ui.Button):
+        view = EconomyConfigView()
+        await view.show_economy_config(interaction)
+
+    async def show_emoji_selection(self, interaction):
+        await self.update_emoji_page(interaction)
+
+    async def update_emoji_page(self, interaction):
+        guild_emojis = list(interaction.guild.emojis)
+        
+        if not guild_emojis:
+            embed = discord.Embed(
+                title="No Server Emojis",
+                description="This server has no custom emojis available for currency.",
+                color=0xFF0000
+            )
+            await interaction.response.edit_message(embed=embed, view=self)
+            return
+        
+        # Calculate pagination
+        start_idx = self.current_page * self.emojis_per_page
+        end_idx = min(start_idx + self.emojis_per_page, len(guild_emojis))
+        page_emojis = guild_emojis[start_idx:end_idx]
+        max_pages = (len(guild_emojis) + self.emojis_per_page - 1) // self.emojis_per_page
+        
+        # Create emoji options
+        emoji_options = []
+        for emoji in page_emojis:
+            # Use the full emoji string for animated emojis
+            emoji_value = str(emoji)
+            emoji_options.append(discord.SelectOption(
+                label=emoji.name[:100],  # Discord label limit
+                value=emoji_value,
+                description=f"ID: {emoji.id} • Animated: {'Yes' if emoji.animated else 'No'}"[:100],
+                emoji=emoji
+            ))
+        
+        if not emoji_options:
+            emoji_options.append(discord.SelectOption(label="No emojis on this page", value="none"))
+        
+        # Update select menu
+        self.children[0].options = emoji_options
+        self.children[0].placeholder = f"Select from {len(page_emojis)} emojis (Page {self.current_page + 1}/{max_pages})"
+        
+        # Update navigation buttons
+        self.children[1].disabled = self.current_page == 0
+        self.children[2].disabled = self.current_page >= max_pages - 1
+        
+        embed = discord.Embed(
+            title="Choose Server Emoji for Currency",
+            description=f"Browse server emojis to use as currency symbol\n\n**Page {self.current_page + 1} of {max_pages}**\nShowing emojis {start_idx + 1}-{end_idx} of {len(guild_emojis)}",
+            color=BOT_CONFIG["default_embed_color"]
+        )
+        
+        # Show emoji preview
+        if page_emojis:
+            emoji_preview = " ".join([str(emoji) for emoji in page_emojis[:10]])  # Show first 10 emojis
+            if len(page_emojis) > 10:
+                emoji_preview += f" ... (+{len(page_emojis) - 10} more)"
+            embed.add_field(name="Emojis on this page", value=emoji_preview, inline=False)
+        
+        # Show server emoji stats
+        animated_count = len([e for e in guild_emojis if e.animated])
+        static_count = len(guild_emojis) - animated_count
+        embed.add_field(
+            name="Server Emoji Statistics",
+            value=f"Total: {len(guild_emojis)}\nStatic: {static_count}\nAnimated: {animated_count}",
+            inline=True
+        )
+        
+        if hasattr(interaction, 'response') and not interaction.response.is_done():
+            await interaction.response.edit_message(embed=embed, view=self)
+        else:
+            await interaction.edit_original_response(embed=embed, view=self)
+
+
         else:
             await interaction.response.send_message("Autoresponder not found.", ephemeral=True)
     
