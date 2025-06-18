@@ -480,14 +480,40 @@ class TierListItemModal(discord.ui.Modal):
             if item not in tier_data[tier]:
                 tier_data[tier].append(item)
                 save_json("tierlist.json", tier_data)
-                await interaction.response.send_message(f"✅ Added '{item}' to {tier.upper()} tier", ephemeral=True)
+                
+                # Update the view display
+                embed = discord.Embed(
+                    title=f"Tier List Management - {tier.upper()} Tier",
+                    color=get_color_for_tier(tier)
+                )
+
+                items = tier_data.get(tier, [])
+                if items:
+                    embed.description = "\n".join([f"• {item_display}" for item_display in items])
+                else:
+                    embed.description = "No items in this tier"
+
+                await interaction.response.edit_message(embed=embed, view=self.view)
             else:
                 await interaction.response.send_message(f"'{item}' is already in {tier.upper()} tier", ephemeral=True)
         else:  # remove
             if item in tier_data[tier]:
                 tier_data[tier].remove(item)
                 save_json("tierlist.json", tier_data)
-                await interaction.response.send_message(f"✅ Removed '{item}' from {tier.upper()} tier", ephemeral=True)
+                
+                # Update the view display
+                embed = discord.Embed(
+                    title=f"Tier List Management - {tier.upper()} Tier",
+                    color=get_color_for_tier(tier)
+                )
+
+                items = tier_data.get(tier, [])
+                if items:
+                    embed.description = "\n".join([f"• {item_display}" for item_display in items])
+                else:
+                    embed.description = "No items in this tier"
+
+                await interaction.response.edit_message(embed=embed, view=self.view)
             else:
                 await interaction.response.send_message(f"'{item}' not found in {tier.upper()} tier", ephemeral=True)
 
@@ -565,8 +591,11 @@ class ShopManagementView(discord.ui.View):
 
     @discord.ui.select(placeholder="Select a shop to manage...")
     async def shop_select(self, interaction: discord.Interaction, select: discord.ui.Select):
-        self.current_shop = select.values[0]
-        await self.update_shop_display(interaction)
+        self.current_shop = select.values[0] if select.values[0] != "none" else None
+        if self.current_shop:
+            await self.update_shop_display(interaction)
+        else:
+            await interaction.response.defer()
 
     @discord.ui.button(label="Create Shop", style=discord.ButtonStyle.green)
     async def create_shop(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -589,6 +618,21 @@ class ShopManagementView(discord.ui.View):
         modal = ShopItemModal(self, "remove")
         await interaction.response.send_modal(modal)
 
+    @discord.ui.button(label="Delete Shop", style=discord.ButtonStyle.red)
+    async def delete_shop(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self.current_shop:
+            await interaction.response.send_message("Please select a shop first.", ephemeral=True)
+            return
+        
+        # Confirmation
+        confirm_view = ShopDeleteConfirmView(self, self.current_shop)
+        embed = discord.Embed(
+            title="Confirm Shop Deletion",
+            description=f"Are you sure you want to delete the shop **{self.current_shop}**? This action cannot be undone.",
+            color=0xFF0000
+        )
+        await interaction.response.send_message(embed=embed, view=confirm_view, ephemeral=True)
+
     async def update_shop_list(self):
         options = []
         for shop_name in shops_data.keys():
@@ -600,8 +644,13 @@ class ShopManagementView(discord.ui.View):
         self.children[0].options = options[:25]  # Discord limit
 
     async def update_shop_display(self, interaction):
-        if self.current_shop not in shops_data:
-            await interaction.response.send_message("Shop not found.", ephemeral=True)
+        if self.current_shop == "none" or self.current_shop not in shops_data:
+            embed = discord.Embed(
+                title="Shop Management",
+                description="Select a shop to manage or create a new one:",
+                color=BOT_CONFIG["default_embed_color"]
+            )
+            await interaction.response.edit_message(embed=embed, view=self)
             return
 
         shop = shops_data[self.current_shop]
@@ -617,12 +666,45 @@ class ShopManagementView(discord.ui.View):
             for item_name, item_data in items.items():
                 price = item_data.get("price", 0)
                 currency = get_currency_symbol()
-                item_list.append(f"**{item_name}**: {currency}{price}")
-            embed.add_field(name="Items", value="\n".join(item_list), inline=False)
+                desc = item_data.get("description", "")
+                desc_text = f" - {desc}" if desc else ""
+                item_list.append(f"**{item_name}**: {currency}{price}{desc_text}")
+            embed.add_field(name="Items", value="\n".join(item_list)[:1024], inline=False)
         else:
             embed.add_field(name="Items", value="No items in this shop", inline=False)
 
+        embed.set_footer(text=f"Shop created by: {shop.get('created_by', 'Unknown')}")
         await interaction.response.edit_message(embed=embed, view=self)
+
+    async def refresh_after_modal(self, interaction):
+        await self.update_shop_list()
+        embed = discord.Embed(
+            title="Shop Management",
+            description="Select a shop to manage or create a new one:",
+            color=BOT_CONFIG["default_embed_color"]
+        )
+        await interaction.edit_original_response(embed=embed, view=self)
+
+class ShopDeleteConfirmView(discord.ui.View):
+    def __init__(self, parent_view, shop_name):
+        super().__init__(timeout=60)
+        self.parent_view = parent_view
+        self.shop_name = shop_name
+
+    @discord.ui.button(label="Yes, Delete", style=discord.ButtonStyle.red)
+    async def confirm_delete(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.shop_name in shops_data:
+            del shops_data[self.shop_name]
+            save_json("shops.json", shops_data)
+            self.parent_view.current_shop = None
+            await self.parent_view.refresh_after_modal(interaction)
+            await interaction.response.send_message(f"✅ Shop '{self.shop_name}' deleted successfully", ephemeral=True)
+        else:
+            await interaction.response.send_message("Shop not found.", ephemeral=True)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel_delete(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message("Shop deletion cancelled.", ephemeral=True)
 
 class CreateShopModal(discord.ui.Modal):
     def __init__(self, view):
@@ -661,7 +743,8 @@ class CreateShopModal(discord.ui.Modal):
         }
         save_json("shops.json", shops_data)
 
-        await self.view.update_shop_list()
+        self.view.current_shop = shop_name
+        await self.view.refresh_after_modal(interaction)
         await interaction.response.send_message(f"✅ Created shop '{shop_name}'", ephemeral=True)
 
 class ShopItemModal(discord.ui.Modal):
@@ -715,13 +798,57 @@ class ShopItemModal(discord.ui.Modal):
                 "description": self.description.value.strip()
             }
             save_json("shops.json", shops_data)
-            await interaction.response.send_message(f"✅ Added '{item_name}' to shop", ephemeral=True)
+            
+            # Update the view display
+            embed = discord.Embed(
+                title=f"Managing Shop: {self.view.current_shop}",
+                description=shop.get("description", "No description"),
+                color=BOT_CONFIG["default_embed_color"]
+            )
+
+            items = shop.get("items", {})
+            if items:
+                item_list = []
+                for item_name_display, item_data in items.items():
+                    price_display = item_data.get("price", 0)
+                    currency = get_currency_symbol()
+                    desc = item_data.get("description", "")
+                    desc_text = f" - {desc}" if desc else ""
+                    item_list.append(f"**{item_name_display}**: {currency}{price_display}{desc_text}")
+                embed.add_field(name="Items", value="\n".join(item_list)[:1024], inline=False)
+            else:
+                embed.add_field(name="Items", value="No items in this shop", inline=False)
+
+            embed.set_footer(text=f"Shop created by: {shop.get('created_by', 'Unknown')}")
+            await interaction.response.edit_message(embed=embed, view=self.view)
 
         else:  # remove
             if item_name in shop["items"]:
                 del shop["items"][item_name]
                 save_json("shops.json", shops_data)
-                await interaction.response.send_message(f"✅ Removed '{item_name}' from shop", ephemeral=True)
+                
+                # Update the view display
+                embed = discord.Embed(
+                    title=f"Managing Shop: {self.view.current_shop}",
+                    description=shop.get("description", "No description"),
+                    color=BOT_CONFIG["default_embed_color"]
+                )
+
+                items = shop.get("items", {})
+                if items:
+                    item_list = []
+                    for item_name_display, item_data in items.items():
+                        price_display = item_data.get("price", 0)
+                        currency = get_currency_symbol()
+                        desc = item_data.get("description", "")
+                        desc_text = f" - {desc}" if desc else ""
+                        item_list.append(f"**{item_name_display}**: {currency}{price_display}{desc_text}")
+                    embed.add_field(name="Items", value="\n".join(item_list)[:1024], inline=False)
+                else:
+                    embed.add_field(name="Items", value="No items in this shop", inline=False)
+
+                embed.set_footer(text=f"Shop created by: {shop.get('created_by', 'Unknown')}")
+                await interaction.response.edit_message(embed=embed, view=self.view)
             else:
                 await interaction.response.send_message(f"'{item_name}' not found in shop", ephemeral=True)
 
@@ -1011,7 +1138,34 @@ class ReactionRoleMessageModal(discord.ui.Modal):
 
     async def on_submit(self, interaction: discord.Interaction):
         self.view.reaction_data["message"] = self.message.value
-        await self.view.update_display(interaction)
+        await interaction.response.send_message("✅ Message content set!", ephemeral=True)
+        # Refresh the display by editing the original message
+        embed = discord.Embed(
+            title="Reaction Role Setup",
+            color=BOT_CONFIG["default_embed_color"]
+        )
+
+        if self.view.reaction_data["message"]:
+            embed.add_field(name="Message", value=self.view.reaction_data["message"][:100] + "..." if len(self.view.reaction_data["message"]) > 100 else self.view.reaction_data["message"], inline=False)
+
+        if self.view.reaction_data["roles"]:
+            role_list = []
+            for emoji, role_id in self.view.reaction_data["roles"].items():
+                role = interaction.guild.get_role(role_id)
+                role_name = role.name if role else "Unknown Role"
+                role_list.append(f"{emoji} → {role_name}")
+            embed.add_field(name="Role Reactions", value="\n".join(role_list), inline=False)
+
+        if self.view.reaction_data["rewards"]:
+            reward_list = []
+            for emoji, reward in self.view.reaction_data["rewards"].items():
+                reward_list.append(f"{emoji} → +{reward['xp']} XP, {get_currency_symbol()}{reward['currency']}")
+            embed.add_field(name="Rewards", value="\n".join(reward_list), inline=False)
+
+        try:
+            await interaction.edit_original_response(embed=embed, view=self.view)
+        except:
+            pass
 
 class ReactionRoleAddModal(discord.ui.Modal):
     def __init__(self, view):
@@ -1046,6 +1200,34 @@ class ReactionRoleAddModal(discord.ui.Modal):
 
             self.view.reaction_data["roles"][self.emoji.value] = role_id
             await interaction.response.send_message(f"✅ Added {self.emoji.value} → {role.name}", ephemeral=True)
+
+            # Update the main display
+            embed = discord.Embed(
+                title="Reaction Role Setup",
+                color=BOT_CONFIG["default_embed_color"]
+            )
+
+            if self.view.reaction_data["message"]:
+                embed.add_field(name="Message", value=self.view.reaction_data["message"][:100] + "..." if len(self.view.reaction_data["message"]) > 100 else self.view.reaction_data["message"], inline=False)
+
+            if self.view.reaction_data["roles"]:
+                role_list = []
+                for emoji, role_id_display in self.view.reaction_data["roles"].items():
+                    role_display = interaction.guild.get_role(role_id_display)
+                    role_name = role_display.name if role_display else "Unknown Role"
+                    role_list.append(f"{emoji} → {role_name}")
+                embed.add_field(name="Role Reactions", value="\n".join(role_list), inline=False)
+
+            if self.view.reaction_data["rewards"]:
+                reward_list = []
+                for emoji, reward in self.view.reaction_data["rewards"].items():
+                    reward_list.append(f"{emoji} → +{reward['xp']} XP, {get_currency_symbol()}{reward['currency']}")
+                embed.add_field(name="Rewards", value="\n".join(reward_list), inline=False)
+
+            try:
+                await interaction.edit_original_response(embed=embed, view=self.view)
+            except:
+                pass
 
         except ValueError:
             await interaction.response.send_message("Invalid role ID.", ephemeral=True)
@@ -1091,6 +1273,34 @@ class ReactionRoleRewardModal(discord.ui.Modal):
             }
 
             await interaction.response.send_message(f"✅ Added reward for {self.emoji.value}", ephemeral=True)
+
+            # Update the main display
+            embed = discord.Embed(
+                title="Reaction Role Setup",
+                color=BOT_CONFIG["default_embed_color"]
+            )
+
+            if self.view.reaction_data["message"]:
+                embed.add_field(name="Message", value=self.view.reaction_data["message"][:100] + "..." if len(self.view.reaction_data["message"]) > 100 else self.view.reaction_data["message"], inline=False)
+
+            if self.view.reaction_data["roles"]:
+                role_list = []
+                for emoji, role_id in self.view.reaction_data["roles"].items():
+                    role = interaction.guild.get_role(role_id)
+                    role_name = role.name if role else "Unknown Role"
+                    role_list.append(f"{emoji} → {role_name}")
+                embed.add_field(name="Role Reactions", value="\n".join(role_list), inline=False)
+
+            if self.view.reaction_data["rewards"]:
+                reward_list = []
+                for emoji, reward in self.view.reaction_data["rewards"].items():
+                    reward_list.append(f"{emoji} → +{reward['xp']} XP, {get_currency_symbol()}{reward['currency']}")
+                embed.add_field(name="Rewards", value="\n".join(reward_list), inline=False)
+
+            try:
+                await interaction.edit_original_response(embed=embed, view=self.view)
+            except:
+                pass
 
         except ValueError:
             await interaction.response.send_message("Invalid XP or currency amount.", ephemeral=True)
@@ -2266,12 +2476,12 @@ class VerificationSetupView(discord.ui.View):
 
     @discord.ui.button(label="📝 Set Verification Word", style=discord.ButtonStyle.primary)
     async def set_word(self, interaction: discord.Interaction, button: discord.ui.Button):
-        modal = VerificationWordModal()
+        modal = VerificationWordModal(self)
         await interaction.response.send_modal(modal)
 
     @discord.ui.button(label="🎭 Set Verification Role", style=discord.ButtonStyle.secondary)
     async def set_role(self, interaction: discord.Interaction, button: discord.ui.Button):
-        modal = VerificationRoleModal()
+        modal = VerificationRoleModal(self)
         await interaction.response.send_modal(modal)
 
     @discord.ui.button(label="🗑️ Toggle Delete Messages", style=discord.ButtonStyle.secondary)
@@ -2282,6 +2492,9 @@ class VerificationSetupView(discord.ui.View):
         
         status = "enabled" if verification_data["delete_messages"] else "disabled"
         await interaction.response.send_message(f"✅ Message deletion is now **{status}**", ephemeral=True)
+        
+        # Update the main display
+        await self.update_display(interaction)
 
     @discord.ui.button(label="📋 View Settings", style=discord.ButtonStyle.secondary)
     async def view_settings(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -2296,12 +2509,18 @@ class VerificationSetupView(discord.ui.View):
         verification_data["enabled"] = True
         save_json("verification.json", verification_data)
         await interaction.response.send_message("✅ Verification system enabled!", ephemeral=True)
+        
+        # Update the main display
+        await self.update_display(interaction)
 
     @discord.ui.button(label="❌ Disable Verification", style=discord.ButtonStyle.red)
     async def disable_verification(self, interaction: discord.Interaction, button: discord.ui.Button):
         verification_data["enabled"] = False
         save_json("verification.json", verification_data)
         await interaction.response.send_message("❌ Verification system disabled!", ephemeral=True)
+        
+        # Update the main display
+        await self.update_display(interaction)
 
     async def update_display(self, interaction: discord.Interaction):
         embed = discord.Embed(
@@ -2342,12 +2561,15 @@ class VerificationSetupView(discord.ui.View):
         await interaction.response.edit_message(embed=embed, view=self)
 
 class VerificationWordModal(discord.ui.Modal):
-    def __init__(self):
+    def __init__(self, view):
         super().__init__(title="Set Verification Word")
+        self.view = view
 
+        current_word = verification_data.get("word", "")
         self.word = discord.ui.TextInput(
             label="Verification Word",
             placeholder="Enter the word users must say to get verified",
+            default=current_word,
             required=True,
             max_length=50
         )
@@ -2357,14 +2579,20 @@ class VerificationWordModal(discord.ui.Modal):
         verification_data["word"] = self.word.value.lower().strip()
         save_json("verification.json", verification_data)
         await interaction.response.send_message(f"✅ Verification word set to: `{self.word.value}`", ephemeral=True)
+        
+        # Update the main display
+        await self.view.update_display(interaction)
 
 class VerificationRoleModal(discord.ui.Modal):
-    def __init__(self):
+    def __init__(self, view):
         super().__init__(title="Set Verification Role")
+        self.view = view
 
+        current_role = verification_data.get("role_id", "")
         self.role_id = discord.ui.TextInput(
             label="Role ID",
             placeholder="Enter the role ID to give verified users",
+            default=str(current_role) if current_role else "",
             required=True,
             max_length=20
         )
@@ -2382,6 +2610,9 @@ class VerificationRoleModal(discord.ui.Modal):
             verification_data["role_id"] = role_id
             save_json("verification.json", verification_data)
             await interaction.response.send_message(f"✅ Verification role set to: {role.mention}", ephemeral=True)
+            
+            # Update the main display
+            await self.view.update_display(interaction)
 
         except ValueError:
             await interaction.response.send_message("Invalid role ID. Please enter numbers only.", ephemeral=True)
@@ -3532,6 +3763,7 @@ class ConfigurationView(discord.ui.View):
             await self.show_economy_config(interaction)
 
     async def show_channel_config(self, interaction):
+        view = ChannelConfigView(self)
         embed = discord.Embed(
             title="Channel Configuration",
             description="Current channel settings:",
@@ -3555,9 +3787,10 @@ class ConfigurationView(discord.ui.View):
                 value = "Not set"
             embed.add_field(name=name, value=value, inline=True)
         
-        await interaction.response.edit_message(embed=embed, view=self)
+        await interaction.response.edit_message(embed=embed, view=view)
 
     async def show_role_config(self, interaction):
+        view = RoleConfigView(self)
         embed = discord.Embed(
             title="Role Configuration",
             description="Current role settings:",
@@ -3576,9 +3809,10 @@ class ConfigurationView(discord.ui.View):
             inline=False
         )
         
-        await interaction.response.edit_message(embed=embed, view=self)
+        await interaction.response.edit_message(embed=embed, view=view)
 
     async def show_color_config(self, interaction):
+        view = ColorConfigView(self)
         embed = discord.Embed(
             title="Color Configuration",
             description="Current color settings:",
@@ -3593,9 +3827,10 @@ class ConfigurationView(discord.ui.View):
         
         embed.add_field(name="Tier Colors", value="\n".join(tier_colors), inline=False)
         
-        await interaction.response.edit_message(embed=embed, view=self)
+        await interaction.response.edit_message(embed=embed, view=view)
 
     async def show_economy_config(self, interaction):
+        view = EconomyConfigView(self)
         embed = discord.Embed(
             title="Economy Configuration",
             description="Current economy settings:",
@@ -3604,7 +3839,384 @@ class ConfigurationView(discord.ui.View):
         
         embed.add_field(name="Currency Symbol", value=BOT_CONFIG.get("currency_symbol", "$"), inline=True)
         
-        await interaction.response.edit_message(embed=embed, view=self)
+        await interaction.response.edit_message(embed=embed, view=view)
+
+class ChannelConfigView(discord.ui.View):
+    def __init__(self, parent_view):
+        super().__init__(timeout=300)
+        self.parent_view = parent_view
+
+    @discord.ui.button(label="Set Tier Channel", style=discord.ButtonStyle.secondary)
+    async def set_tier_channel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        modal = ChannelConfigModal("tier_channel_id", "Tier Channel", self)
+        await interaction.response.send_modal(modal)
+
+    @discord.ui.button(label="Set Auction Forum", style=discord.ButtonStyle.secondary)
+    async def set_auction_forum(self, interaction: discord.Interaction, button: discord.ui.Button):
+        modal = ChannelConfigModal("auction_forum_channel_id", "Auction Forum", self)
+        await interaction.response.send_modal(modal)
+
+    @discord.ui.button(label="Set Premium Auction Forum", style=discord.ButtonStyle.secondary)
+    async def set_premium_auction_forum(self, interaction: discord.Interaction, button: discord.ui.Button):
+        modal = ChannelConfigModal("premium_auction_forum_channel_id", "Premium Auction Forum", self)
+        await interaction.response.send_modal(modal)
+
+    @discord.ui.button(label="Set Level Up Channel", style=discord.ButtonStyle.secondary)
+    async def set_levelup_channel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        modal = ChannelConfigModal("levelup_channel_id", "Level Up Channel", self)
+        await interaction.response.send_modal(modal)
+
+    @discord.ui.button(label="Set Suggestions Channel", style=discord.ButtonStyle.secondary)
+    async def set_suggestions_channel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        modal = ChannelConfigModal("suggestions_channel_id", "Suggestions Channel", self)
+        await interaction.response.send_modal(modal)
+
+    @discord.ui.button(label="Set Reports Channel", style=discord.ButtonStyle.secondary, row=1)
+    async def set_reports_channel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        modal = ChannelConfigModal("reports_channel_id", "Reports Channel", self)
+        await interaction.response.send_modal(modal)
+
+    @discord.ui.button(label="Back to Main", style=discord.ButtonStyle.primary, row=1)
+    async def back_to_main(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = discord.Embed(
+            title="Bot Configuration",
+            description="Select a category to configure:",
+            color=BOT_CONFIG["default_embed_color"]
+        )
+        await interaction.response.edit_message(embed=embed, view=self.parent_view)
+
+    async def refresh_display(self, interaction):
+        embed = discord.Embed(
+            title="Channel Configuration",
+            description="Current channel settings:",
+            color=BOT_CONFIG["default_embed_color"]
+        )
+        
+        channels = {
+            "Tier Channel": BOT_CONFIG.get("tier_channel_id"),
+            "Auction Forum": BOT_CONFIG.get("auction_forum_channel_id"), 
+            "Premium Auction Forum": BOT_CONFIG.get("premium_auction_forum_channel_id"),
+            "Level Up Channel": BOT_CONFIG.get("levelup_channel_id"),
+            "Suggestions Channel": BOT_CONFIG.get("suggestions_channel_id"),
+            "Reports Channel": BOT_CONFIG.get("reports_channel_id")
+        }
+        
+        for name, channel_id in channels.items():
+            if channel_id:
+                channel = bot.get_channel(channel_id)
+                value = channel.mention if channel else f"Invalid ({channel_id})"
+            else:
+                value = "Not set"
+            embed.add_field(name=name, value=value, inline=True)
+        
+        await interaction.edit_original_response(embed=embed, view=self)
+
+class ChannelConfigModal(discord.ui.Modal):
+    def __init__(self, config_key: str, channel_name: str, view):
+        super().__init__(title=f"Set {channel_name}")
+        self.config_key = config_key
+        self.channel_name = channel_name
+        self.view = view
+
+        current_value = BOT_CONFIG.get(config_key)
+        default_text = str(current_value) if current_value else ""
+
+        self.channel_id = discord.ui.TextInput(
+            label="Channel ID",
+            placeholder="Enter the channel ID (leave empty to unset)",
+            default=default_text,
+            required=False,
+            max_length=20
+        )
+        self.add_item(self.channel_id)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not self.channel_id.value.strip():
+            # Unset the channel
+            BOT_CONFIG[self.config_key] = None
+            save_json("bot_config.json", BOT_CONFIG)
+            await interaction.response.send_message(f"✅ {self.channel_name} has been unset", ephemeral=True)
+            # Refresh the view
+            await self.view.refresh_display(interaction)
+            return
+
+        try:
+            channel_id = int(self.channel_id.value)
+            channel = bot.get_channel(channel_id)
+            
+            if not channel:
+                await interaction.response.send_message("Channel not found.", ephemeral=True)
+                return
+
+            BOT_CONFIG[self.config_key] = channel_id
+            save_json("bot_config.json", BOT_CONFIG)
+            await interaction.response.send_message(f"✅ {self.channel_name} set to {channel.mention}", ephemeral=True)
+            # Refresh the view
+            await self.view.refresh_display(interaction)
+
+        except ValueError:
+            await interaction.response.send_message("Invalid channel ID. Please enter numbers only.", ephemeral=True)
+
+class RoleConfigView(discord.ui.View):
+    def __init__(self, parent_view):
+        super().__init__(timeout=300)
+        self.parent_view = parent_view
+
+    @discord.ui.button(label="Add Staff Role", style=discord.ButtonStyle.green)
+    async def add_staff_role(self, interaction: discord.Interaction, button: discord.ui.Button):
+        modal = StaffRoleModal("add", self)
+        await interaction.response.send_modal(modal)
+
+    @discord.ui.button(label="Remove Staff Role", style=discord.ButtonStyle.red)
+    async def remove_staff_role(self, interaction: discord.Interaction, button: discord.ui.Button):
+        modal = StaffRoleModal("remove", self)
+        await interaction.response.send_modal(modal)
+
+    @discord.ui.button(label="Clear All Staff Roles", style=discord.ButtonStyle.red)
+    async def clear_staff_roles(self, interaction: discord.Interaction, button: discord.ui.Button):
+        BOT_CONFIG["staff_roles"] = []
+        save_json("bot_config.json", BOT_CONFIG)
+        await interaction.response.send_message("✅ All staff roles cleared", ephemeral=True)
+        await self.refresh_display(interaction)
+
+    @discord.ui.button(label="Back to Main", style=discord.ButtonStyle.primary)
+    async def back_to_main(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = discord.Embed(
+            title="Bot Configuration",
+            description="Select a category to configure:",
+            color=BOT_CONFIG["default_embed_color"]
+        )
+        await interaction.response.edit_message(embed=embed, view=self.parent_view)
+
+    async def refresh_display(self, interaction):
+        embed = discord.Embed(
+            title="Role Configuration",
+            description="Current role settings:",
+            color=BOT_CONFIG["default_embed_color"]
+        )
+        
+        staff_roles = []
+        for role_id in BOT_CONFIG.get("staff_roles", []):
+            role = interaction.guild.get_role(role_id)
+            if role:
+                staff_roles.append(role.mention)
+        
+        embed.add_field(
+            name="Staff Roles",
+            value="\n".join(staff_roles) if staff_roles else "None set",
+            inline=False
+        )
+        
+        await interaction.edit_original_response(embed=embed, view=self)
+
+class StaffRoleModal(discord.ui.Modal):
+    def __init__(self, action: str, view):
+        super().__init__(title=f"{action.title()} Staff Role")
+        self.action = action
+        self.view = view
+
+        self.role_id = discord.ui.TextInput(
+            label="Role ID",
+            placeholder="Enter the role ID",
+            required=True,
+            max_length=20
+        )
+        self.add_item(self.role_id)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            role_id = int(self.role_id.value)
+            role = interaction.guild.get_role(role_id)
+            
+            if not role:
+                await interaction.response.send_message("Role not found in this server.", ephemeral=True)
+                return
+
+            if self.action == "add":
+                if role_id not in BOT_CONFIG["staff_roles"]:
+                    BOT_CONFIG["staff_roles"].append(role_id)
+                    save_json("bot_config.json", BOT_CONFIG)
+                    await interaction.response.send_message(f"✅ Added {role.mention} as a staff role", ephemeral=True)
+                    await self.view.refresh_display(interaction)
+                else:
+                    await interaction.response.send_message("Role is already a staff role.", ephemeral=True)
+            else:  # remove
+                if role_id in BOT_CONFIG["staff_roles"]:
+                    BOT_CONFIG["staff_roles"].remove(role_id)
+                    save_json("bot_config.json", BOT_CONFIG)
+                    await interaction.response.send_message(f"✅ Removed {role.mention} from staff roles", ephemeral=True)
+                    await self.view.refresh_display(interaction)
+                else:
+                    await interaction.response.send_message("Role is not a staff role.", ephemeral=True)
+
+        except ValueError:
+            await interaction.response.send_message("Invalid role ID. Please enter numbers only.", ephemeral=True)
+
+class ColorConfigView(discord.ui.View):
+    def __init__(self, parent_view):
+        super().__init__(timeout=300)
+        self.parent_view = parent_view
+
+    @discord.ui.button(label="Set Default Color", style=discord.ButtonStyle.secondary)
+    async def set_default_color(self, interaction: discord.Interaction, button: discord.ui.Button):
+        modal = ColorConfigModal("default_embed_color", "Default Embed Color", self)
+        await interaction.response.send_modal(modal)
+
+    @discord.ui.button(label="Set Tier Colors", style=discord.ButtonStyle.secondary)
+    async def set_tier_colors(self, interaction: discord.Interaction, button: discord.ui.Button):
+        modal = TierColorModal(self)
+        await interaction.response.send_modal(modal)
+
+    @discord.ui.button(label="Back to Main", style=discord.ButtonStyle.primary)
+    async def back_to_main(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = discord.Embed(
+            title="Bot Configuration",
+            description="Select a category to configure:",
+            color=BOT_CONFIG["default_embed_color"]
+        )
+        await interaction.response.edit_message(embed=embed, view=self.parent_view)
+
+    async def refresh_display(self, interaction):
+        embed = discord.Embed(
+            title="Color Configuration",
+            description="Current color settings:",
+            color=BOT_CONFIG["default_embed_color"]
+        )
+        
+        embed.add_field(name="Default Color", value=f"#{BOT_CONFIG['default_embed_color']:06x}", inline=True)
+        
+        tier_colors = []
+        for tier, color in BOT_CONFIG.get("tier_colors", {}).items():
+            tier_colors.append(f"**{tier}**: #{color:06x}")
+        
+        embed.add_field(name="Tier Colors", value="\n".join(tier_colors), inline=False)
+        
+        await interaction.edit_original_response(embed=embed, view=self)
+
+class ColorConfigModal(discord.ui.Modal):
+    def __init__(self, config_key: str, color_name: str, view):
+        super().__init__(title=f"Set {color_name}")
+        self.config_key = config_key
+        self.color_name = color_name
+        self.view = view
+
+        current_color = BOT_CONFIG.get(config_key, 0)
+        default_text = f"#{current_color:06x}" if current_color else ""
+
+        self.color_input = discord.ui.TextInput(
+            label="Color (hex)",
+            placeholder="e.g., #FF5733 or FF5733",
+            default=default_text,
+            required=True,
+            max_length=7
+        )
+        self.add_item(self.color_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            hex_color = self.color_input.value.lstrip('#')
+            color = int(hex_color, 16)
+            
+            BOT_CONFIG[self.config_key] = color
+            save_json("bot_config.json", BOT_CONFIG)
+            await interaction.response.send_message(f"✅ {self.color_name} set to #{hex_color}", ephemeral=True)
+            await self.view.refresh_display(interaction)
+
+        except ValueError:
+            await interaction.response.send_message("Invalid hex color format. Use format like #FF5733 or FF5733", ephemeral=True)
+
+class TierColorModal(discord.ui.Modal):
+    def __init__(self, view):
+        super().__init__(title="Set Tier Colors")
+        self.view = view
+
+        self.tier_input = discord.ui.TextInput(
+            label="Tier (S, A, B, C, D)",
+            placeholder="Enter tier letter",
+            required=True,
+            max_length=1
+        )
+
+        self.color_input = discord.ui.TextInput(
+            label="Color (hex)",
+            placeholder="e.g., #FF5733 or FF5733",
+            required=True,
+            max_length=7
+        )
+
+        self.add_item(self.tier_input)
+        self.add_item(self.color_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            tier = self.tier_input.value.upper().strip()
+            if tier not in ["S", "A", "B", "C", "D"]:
+                await interaction.response.send_message("Invalid tier. Use S, A, B, C, or D.", ephemeral=True)
+                return
+
+            hex_color = self.color_input.value.lstrip('#')
+            color = int(hex_color, 16)
+            
+            BOT_CONFIG["tier_colors"][tier] = color
+            save_json("bot_config.json", BOT_CONFIG)
+            await interaction.response.send_message(f"✅ {tier} tier color set to #{hex_color}", ephemeral=True)
+            await self.view.refresh_display(interaction)
+
+        except ValueError:
+            await interaction.response.send_message("Invalid hex color format. Use format like #FF5733 or FF5733", ephemeral=True)
+
+class EconomyConfigView(discord.ui.View):
+    def __init__(self, parent_view):
+        super().__init__(timeout=300)
+        self.parent_view = parent_view
+
+    @discord.ui.button(label="Set Currency Symbol", style=discord.ButtonStyle.secondary)
+    async def set_currency_symbol(self, interaction: discord.Interaction, button: discord.ui.Button):
+        modal = CurrencySymbolModal(self)
+        await interaction.response.send_modal(modal)
+
+    @discord.ui.button(label="Back to Main", style=discord.ButtonStyle.primary)
+    async def back_to_main(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = discord.Embed(
+            title="Bot Configuration",
+            description="Select a category to configure:",
+            color=BOT_CONFIG["default_embed_color"]
+        )
+        await interaction.response.edit_message(embed=embed, view=self.parent_view)
+
+    async def refresh_display(self, interaction):
+        embed = discord.Embed(
+            title="Economy Configuration",
+            description="Current economy settings:",
+            color=BOT_CONFIG["default_embed_color"]
+        )
+        
+        embed.add_field(name="Currency Symbol", value=BOT_CONFIG.get("currency_symbol", "$"), inline=True)
+        
+        await interaction.edit_original_response(embed=embed, view=self)
+
+class CurrencySymbolModal(discord.ui.Modal):
+    def __init__(self, view):
+        super().__init__(title="Set Currency Symbol")
+        self.view = view
+
+        current_symbol = BOT_CONFIG.get("currency_symbol", "$")
+
+        self.symbol_input = discord.ui.TextInput(
+            label="Currency Symbol",
+            placeholder="e.g., $, €, ¥, 💰",
+            default=current_symbol,
+            required=True,
+            max_length=10
+        )
+        self.add_item(self.symbol_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        symbol = self.symbol_input.value.strip()
+        BOT_CONFIG["currency_symbol"] = symbol
+        save_json("bot_config.json", BOT_CONFIG)
+        await interaction.response.send_message(f"✅ Currency symbol set to {symbol}", ephemeral=True)
+        await self.view.refresh_display(interaction)
 
 @tree.command(name="config", description="Configure bot settings", guild=discord.Object(id=GUILD_ID))
 @guild_only()
