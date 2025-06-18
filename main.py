@@ -4278,7 +4278,7 @@ class RoleConfigView(discord.ui.View):
 
         await interaction.edit_original_response(embed=embed, view=self)
 
-    class StaffRoleModal(discord.ui.Modal):
+class StaffRoleModal(discord.ui.Modal):
     def __init__(self, action: str, view):
         super().__init__(title=f"{action.title()} Staff Role")
         self.action = action
